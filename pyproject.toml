@@ -1,0 +1,27 @@
+[project]
+name = "pandabot"
+version = "0.1.0"
+description = "pandabot"
+readme = "README.md"
+requires-python = ">=3.10, <4.0"
+dependencies = [
+    "nonebot2[httpx,websockets]>=2.5.0",
+    "nonebot-adapter-qq>=1.7.3",
+    "nonebot-plugin-docs>=2.5.0",
+    "nonebot-plugin-htmlkit>=0.1.0rc5",
+]
+
+[tool.nonebot]
+plugin_dirs = ["src/plugins"]
+builtin_plugins = ["echo"]
+
+[tool.nonebot.adapters]
+nonebot-adapter-qq = [
+    { name = "QQ", module_name = "nonebot.adapters.qq" }
+]
+"@local" = []
+
+[tool.nonebot.plugins]
+"@local" = []
+nonebot-plugin-docs = ["nonebot_plugin_docs"]
+nonebot-plugin-htmlkit = ["nonebot_plugin_htmlkit"]
