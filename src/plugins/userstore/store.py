@@ -25,7 +25,7 @@ import aiomysql
 KNOWN_COLUMNS = {"openid", "nickname", "note", "msg_count", "first_seen", "last_seen"}
 
 
-class UserStore:
+class MySQLStore:
     def __init__(self):
         self.host = os.getenv("DB_HOST", "127.0.0.1")
         self.port = int(os.getenv("DB_PORT", "3306"))
@@ -240,5 +240,69 @@ class UserStore:
         return True, await self.get_score(uid)
 
 
-# 全局单例（插件 startup 时调用 await store.init()）
-store = UserStore()
+# ===== 全局路由单例：自动选择后端 =====
+# 配了 DB_HOST 且能连上 → MySQL；否则零安装退回本地 SQLite 文件。
+from nonebot.log import logger
+
+from .sqlite_store import SQLiteStore
+
+
+class StoreRouter:
+    def __init__(self):
+        self.backend = None
+        self.kind = None
+
+    async def init(self):
+        # DB_HOST=none 显式禁用 MySQL，直接用 SQLite
+        if os.getenv("DB_HOST", "").strip().lower() == "none":
+            self._use_sqlite()
+            return
+        try:
+            mysql = MySQLStore()
+            await mysql.init()
+            self.backend = mysql
+            self.kind = "mysql"
+            logger.info(f"数据库后端：MySQL ({mysql.host}:{mysql.port}/{mysql.db})")
+            return
+        except Exception as e:  # 连不上则回退，不阻断启动
+            logger.warning(f"MySQL 不可用，回退到 SQLite：{e!r}", exc_info=True)
+
+        self._use_sqlite()
+
+    def _use_sqlite(self):
+        self.backend = SQLiteStore()
+        self.backend.init()
+        self.kind = "sqlite"
+        logger.info(f"数据库后端：SQLite 文件 {self.backend.path}")
+
+    async def close(self):
+        close = getattr(self.backend, "close", None)
+        if close:
+            res = close()
+            if hasattr(res, "__await__"):
+                await res
+
+    async def touch(self, uid, openid, nickname=""):
+        return self.backend.touch(uid, openid, nickname)
+
+    async def get(self, uid, field, default=None):
+        return self.backend.get(uid, field, default)
+
+    async def all(self, uid):
+        return self.backend.all(uid)
+
+    async def set(self, uid, field, value):
+        self.backend.set(uid, field, value)
+
+    async def incr(self, uid, field, delta=1):
+        return self.backend.incr(uid, field, delta)
+
+    async def get_score(self, uid):
+        return self.backend.get_score(uid)
+
+    async def checkin(self, uid, date_str, gain=10):
+        return self.backend.checkin(uid, date_str, gain)
+
+
+# 插件 startup 时调用 await store.init()
+store = StoreRouter()
