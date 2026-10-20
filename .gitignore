@@ -4,3 +4,8 @@
 __pycache__/
 *.pyc
 *.log
+
+# Python 构建/打包产物
+*.egg-info/
+build/
+dist/

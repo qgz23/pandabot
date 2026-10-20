@@ -9,6 +9,7 @@ dependencies = [
     "nonebot-adapter-qq>=1.7.3",
     "nonebot-plugin-docs>=2.5.0",
     "nonebot-plugin-htmlkit>=0.1.0rc5",
+    "aiomysql>=0.3.2",
 ]
 
 [tool.nonebot]
