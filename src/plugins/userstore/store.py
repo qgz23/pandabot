@@ -36,6 +36,8 @@ class MySQLStore:
 
     # ---------- 初始化：建连接池 + 建表 ----------
     async def init(self):
+        # DB_SSL=1 时启用 SSL 加密（Aiven 等托管库强制要求）
+        ssl = {} if os.getenv("DB_SSL", "").strip() == "1" else None
         self._pool = await aiomysql.create_pool(
             host=self.host,
             port=self.port,
@@ -45,6 +47,7 @@ class MySQLStore:
             charset="utf8mb4",
             autocommit=True,
             maxsize=5,
+            ssl=ssl,
         )
         async with self._pool.acquire() as conn:
             async with conn.cursor() as cur:

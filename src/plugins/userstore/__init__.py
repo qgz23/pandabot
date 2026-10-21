@@ -13,6 +13,8 @@
 数据库连接走环境变量，默认本地 root 空密码 / pandabot 库。
 """
 
+import os
+
 from nonebot import on_command, on_message, get_driver
 from nonebot.params import CommandArg
 from nonebot.adapters.qq import MessageEvent, Message
@@ -24,6 +26,12 @@ driver = get_driver()
 
 @driver.on_startup
 async def _init_db():
+    # NoneBot 不自动把 .env 注入 os.environ，这里手动把 DB_* 灌进去供 store 读取
+    cfg = driver.config
+    for key in ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME", "DB_SSL"):
+        val = getattr(cfg, key.lower(), None)
+        if val is not None and str(val) != "":
+            os.environ[key] = str(val)
     await store.init()
 
 
