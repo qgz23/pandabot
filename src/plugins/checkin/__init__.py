@@ -13,10 +13,11 @@ from datetime import date
 from nonebot import on_command
 from nonebot.adapters.qq import MessageEvent
 
+from src.plugins.settings.config import get
 from src.plugins.userstore.store import store
 
-# 每次签到获得的积分（可按需调整）
-DAILY_GAIN = 10
+# 签到积分默认值；实际运行时每次从 settings.json 热读取，改文件即生效
+DEFAULT_GAIN = 10
 
 
 def _resolve(event: MessageEvent) -> tuple[str, str, str]:
@@ -32,14 +33,18 @@ checkin_cmd = on_command("签到", aliases={"打卡", "checkin"}, priority=10)
 
 @checkin_cmd.handle()
 async def _(event: MessageEvent):
+    if not get("features.checkin_enabled", True):
+        await checkin_cmd.finish("签到功能当前已关闭，请联系管理员")
+
     uid, openid, nickname = _resolve(event)
     await store.touch(uid, openid, nickname)  # 确保用户已建档
     today = date.today().isoformat()
 
-    ok, total = await store.checkin(uid, today, DAILY_GAIN)
+    gain = int(get("checkin_gain", DEFAULT_GAIN))
+    ok, total = await store.checkin(uid, today, gain)
     if ok:
         await checkin_cmd.send(
-            f"{nickname}，签到成功！本次 +{DAILY_GAIN} 积分，当前总积分：{total}"
+            f"{nickname}，签到成功！本次 +{gain} 积分，当前总积分：{total}"
         )
     else:
         await checkin_cmd.send(

@@ -12,7 +12,11 @@ import sqlite3
 import threading
 from datetime import datetime
 
-KNOWN_COLUMNS = {"openid", "nickname", "note", "msg_count", "first_seen", "last_seen"}
+# 已知独立列，写 extra 时要把它们排除掉（理由同 store.py，见那边的注释）
+KNOWN_COLUMNS = {
+    "session_id", "openid", "nickname", "note",
+    "msg_count", "score", "first_seen", "last_seen",
+}
 
 
 class SQLiteStore:
@@ -107,6 +111,17 @@ class SQLiteStore:
     def all(self, uid: str) -> dict:
         return self._fetch(uid) or {}
 
+    # ---------- 读取：列出某个群里有记录的成员 ----------
+    def list_group_members(self, group_openid: str, limit: int = 300) -> list[dict]:
+        pattern = f"group_{group_openid}_%"
+        cur = self._conn.execute(
+            "SELECT session_id, openid, nickname FROM users "
+            "WHERE session_id LIKE ? ORDER BY last_seen DESC LIMIT ?",
+            (pattern, int(limit)),
+        )
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, row)) for row in cur.fetchall()]
+
     # ---------- 写入：某字段 ----------
     def set(self, uid: str, field: str, value):
         with self._lock, self._conn:
@@ -168,3 +183,17 @@ class SQLiteStore:
                 (gain, uid),
             )
         return True, self.get_score(uid)
+
+    # ---------- 直接加减积分列（不是 extra） ----------
+    def add_score(self, uid: str, delta: int = 0) -> int:
+        """给 users.score 列加减分，返回最新积分。
+
+        和 MySQL 后端同样的道理：incr(uid, "score", n) 会写进 extra JSON，
+        而 get_score 读的是 score 列，必须直接 UPDATE 列才对得上。
+        """
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE users SET score=score+? WHERE session_id=?",
+                (int(delta), uid),
+            )
+        return self.get_score(uid)

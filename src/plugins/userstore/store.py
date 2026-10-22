@@ -21,23 +21,49 @@ from datetime import datetime
 
 import aiomysql
 
-# 已知独立列；其余字段写入 extra JSON 列
-KNOWN_COLUMNS = {"openid", "nickname", "note", "msg_count", "first_seen", "last_seen"}
+# 已知独立列；其余字段写入 extra JSON 列。
+# session_id / score 必须列进来：_fetch() 会把整行（含这两列）合并成一个 dict 返回，
+# set()/incr() 再用「row 减去 KNOWN_COLUMNS」重建 extra。漏了它们，
+# extra 里就会莫名其妙多出 session_id 和 score 两个副本，score 还会变成第二份真相。
+KNOWN_COLUMNS = {
+    "session_id", "openid", "nickname", "note",
+    "msg_count", "score", "first_seen", "last_seen",
+}
+
+
+def cfg(key: str, default: str = "") -> str:
+    """读配置：先看环境变量，再看 NoneBot 的 Config。
+
+    为什么两处都要看：`.env.prod` 里的 DB_* 会被 NoneBot 读进 Config，
+    **但不一定进 os.environ**——`nb run` 启动时 nb-cli 顺手 load_dotenv 了，所以有；
+    而 `python -m nonebot` 或测试脚本直接 import 时就没有，os.getenv 全是空，
+    MySQL 配置被当成「没配」，于是静默降级写本地 SQLite。
+    同一份配置换个启动方式就写进不同的库，是最难查的那类 bug。
+    """
+    value = os.getenv(key)
+    if value:
+        return value.strip()
+    try:
+        from nonebot import get_driver
+
+        return str(getattr(get_driver().config, key.lower(), "") or default).strip()
+    except Exception:
+        return default
 
 
 class MySQLStore:
     def __init__(self):
-        self.host = os.getenv("DB_HOST", "127.0.0.1")
-        self.port = int(os.getenv("DB_PORT", "3306"))
-        self.user = os.getenv("DB_USER", "root")
-        self.password = os.getenv("DB_PASSWORD", "")
-        self.db = os.getenv("DB_NAME", "pandabot")
+        self.host = cfg("DB_HOST", "127.0.0.1") or "127.0.0.1"
+        self.port = int(cfg("DB_PORT", "3306") or 3306)
+        self.user = cfg("DB_USER", "root") or "root"
+        self.password = cfg("DB_PASSWORD", "")
+        self.db = cfg("DB_NAME", "pandabot") or "pandabot"
         self._pool = None
 
     # ---------- 初始化：建连接池 + 建表 ----------
     async def init(self):
         # DB_SSL=1 时启用 SSL 加密（Aiven 等托管库强制要求）
-        ssl = {} if os.getenv("DB_SSL", "").strip() == "1" else None
+        ssl = {} if cfg("DB_SSL") == "1" else None
         self._pool = await aiomysql.create_pool(
             host=self.host,
             port=self.port,
@@ -163,6 +189,21 @@ class MySQLStore:
     async def all(self, uid: str) -> dict:
         return await self._fetch(uid) or {}
 
+    # ---------- 读取：列出某个群里有记录的成员 ----------
+    async def list_group_members(self, group_openid: str, limit: int = 300) -> list[dict]:
+        """按 session_id 前缀查。session_id 格式是 group_{group_openid}_{member_openid}，
+        所以 '%' 通配就能把整群捞出来。返回 [{session_id, openid, nickname}, ...]"""
+        pattern = f"group_{group_openid}_%"
+        async with self._pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(
+                    "SELECT session_id, openid, nickname FROM users "
+                    "WHERE session_id LIKE %s ORDER BY last_seen DESC LIMIT %s",
+                    (pattern, int(limit)),
+                )
+                rows = await cur.fetchall()
+        return [dict(r) for r in rows]
+
     # ---------- 写入：写某个字段 ----------
     async def set(self, uid: str, field: str, value):
         if field in ("nickname", "note"):
@@ -242,6 +283,22 @@ class MySQLStore:
                 )
         return True, await self.get_score(uid)
 
+    # ---------- 直接加减积分列（不是 extra） ----------
+    async def add_score(self, uid: str, delta: int = 0) -> int:
+        """给 users.score 列加减分，返回最新积分。
+
+        注意别用 incr(uid, "score", 5)：incr 对非 msg_count 字段是写进 extra JSON
+        （见上面的实现），而 get_score / 签到读的是 score 列，两者不是同一个地方，
+        加了也显示不出来。这里必须直接 UPDATE 列。
+        """
+        async with self._pool.acquire() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "UPDATE users SET score=score+%s WHERE session_id=%s",
+                    (int(delta), uid),
+                )
+        return await self.get_score(uid)
+
 
 # ===== 全局路由单例：自动选择后端 =====
 # 配了 DB_HOST 且能连上 → MySQL；否则零安装退回本地 SQLite 文件。
@@ -254,12 +311,21 @@ class StoreRouter:
     def __init__(self):
         self.backend = None
         self.kind = None
+        # 降级原因。以前这里只打一行 warning 就过去了，结果"数据到底写哪去了"
+        # 完全看不出来——绑定了账号、重启后换个地方查不到，很难定位。
+        # 现在把原因记下来，随时可以用 /数据库状态 查。
+        self.degraded_reason: str = ""
+        self.init_error: str = ""
+        self._requested: str = "mysql"
 
     async def init(self):
         # DB_HOST=none 显式禁用 MySQL，直接用 SQLite
-        if os.getenv("DB_HOST", "").strip().lower() == "none":
+        if cfg("DB_HOST").lower() == "none":
+            self._requested = "sqlite"
             self._use_sqlite()
             return
+
+        host = cfg("DB_HOST") or "127.0.0.1"
         try:
             mysql = MySQLStore()
             await mysql.init()
@@ -268,7 +334,17 @@ class StoreRouter:
             logger.info(f"数据库后端：MySQL ({mysql.host}:{mysql.port}/{mysql.db})")
             return
         except Exception as e:  # 连不上则回退，不阻断启动
-            logger.warning(f"MySQL 不可用，回退到 SQLite：{e!r}", exc_info=True)
+            self.degraded_reason = f"{e.__class__.__name__}: {e}"
+            self.init_error = self.degraded_reason
+            # 用 error 而不是 warning：这不是"有点小问题"，
+            # 而是"你的数据不会写到你以为的地方"，必须显眼。
+            logger.error(
+                f"MySQL 连不上（{host}），已回退到本地 SQLite。\n"
+                f"    原因：{self.degraded_reason}\n"
+                f"    后果：数据会写进本机 data/pandabot.db，搭档那边查不到这些数据。\n"
+                f"    排查：1) 数据库地址/端口是否还有效  2) 云库是否被暂停或删除"
+                f"  3) 是否需要 IP 白名单  4) 能不能用 /数据库状态 看当前状态"
+            )
 
         self._use_sqlite()
 
@@ -278,6 +354,22 @@ class StoreRouter:
         self.kind = "sqlite"
         logger.info(f"数据库后端：SQLite 文件 {self.backend.path}")
 
+    def status(self) -> dict:
+        """当前后端情况，给 /数据库状态 命令用。"""
+        info: dict = {
+            "kind": self.kind,
+            "requested": self._requested,
+            "degraded": bool(self.kind == "sqlite" and self._requested == "mysql"),
+            "reason": self.degraded_reason,
+        }
+        if self.backend is None:
+            return info
+        if self.kind == "mysql":
+            info["target"] = f"{self.backend.host}:{self.backend.port}/{self.backend.db}"
+        else:
+            info["target"] = str(self.backend.path)
+        return info
+
     async def close(self):
         close = getattr(self.backend, "close", None)
         if close:
@@ -285,26 +377,42 @@ class StoreRouter:
             if hasattr(res, "__await__"):
                 await res
 
+    @staticmethod
+    async def _call(fn, *args, **kwargs):
+        """统一适配两种后端：MySQL 是 async def，SQLite 是普通 def。
+        后端返回的是协程就 await，是值就直接返回。
+        少写这一层，MySQL 模式下会拿到未执行的协程对象（写入静默丢失、读取出错）。"""
+        res = fn(*args, **kwargs)
+        if hasattr(res, "__await__"):
+            return await res
+        return res
+
     async def touch(self, uid, openid, nickname=""):
-        return self.backend.touch(uid, openid, nickname)
+        return await self._call(self.backend.touch, uid, openid, nickname)
 
     async def get(self, uid, field, default=None):
-        return self.backend.get(uid, field, default)
+        return await self._call(self.backend.get, uid, field, default)
 
     async def all(self, uid):
-        return self.backend.all(uid)
+        return await self._call(self.backend.all, uid)
+
+    async def list_group_members(self, group_openid, limit=300):
+        return await self._call(self.backend.list_group_members, group_openid, limit)
 
     async def set(self, uid, field, value):
-        self.backend.set(uid, field, value)
+        return await self._call(self.backend.set, uid, field, value)
 
     async def incr(self, uid, field, delta=1):
-        return self.backend.incr(uid, field, delta)
+        return await self._call(self.backend.incr, uid, field, delta)
 
     async def get_score(self, uid):
-        return self.backend.get_score(uid)
+        return await self._call(self.backend.get_score, uid)
 
     async def checkin(self, uid, date_str, gain=10):
-        return self.backend.checkin(uid, date_str, gain)
+        return await self._call(self.backend.checkin, uid, date_str, gain)
+
+    async def add_score(self, uid, delta=0):
+        return await self._call(self.backend.add_score, uid, delta)
 
 
 # 插件 startup 时调用 await store.init()

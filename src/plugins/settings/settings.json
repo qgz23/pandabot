@@ -1,0 +1,47 @@
+{
+  "checkin_gain": 10,
+  "hello_replies": [
+    "你好呀小熊猫！有什么我可以帮到你的吗？",
+    "找我有事吗？",
+    "今天也要元气满满哦～"
+  ],
+  "features": {
+    "checkin_enabled": true
+  },
+  "maimai": {
+    "enabled": true,
+    "cooldown_seconds": 15,
+    "request_timeout": 20,
+    "b50_old_top": 5,
+    "b50_image": true,
+    "b50_style": "grid",
+    "cover_budget": 8,
+    "search_limit": 10,
+    "song_cache_hours": 6
+  },
+  "waifu": {
+    "enabled": true,
+    "upload_reward": 5,
+    "daily_reward_limit": 5
+  },
+  "daily": {
+    "enabled": true,
+    "fortune_enabled": true,
+    "pig_enabled": true,
+    "power_enabled": true,
+    "doro_enabled": true,
+    "hakimi_enabled": true
+  },
+  "game": {
+    "enabled": true
+  },
+  "profile": {
+    "enabled": true,
+    "club_name": "熊猫动漫社",
+    "max_bag": 20
+  },
+  "couple": {
+    "enabled": true,
+    "pool_limit": 300
+  }
+}

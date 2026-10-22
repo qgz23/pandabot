@@ -96,3 +96,34 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
 
     await store.set(uid, "note", content)
     await note_cmd.send(f"已记下：{content}")
+
+
+# ============ 命令：数据库状态（排查"数据到底写哪了"） ============
+db_cmd = on_command("数据库状态", aliases={"数据库", "db状态"}, priority=10)
+
+
+@db_cmd.handle()
+async def _(event: MessageEvent):
+    info = store.status()
+    if info.get("kind") is None:
+        await db_cmd.finish("数据库还没初始化完成，等几秒再试")
+
+    if info["kind"] == "mysql":
+        await db_cmd.finish(
+            f"数据库后端：MySQL\n"
+            f"目标：{info['target']}\n"
+            f"连接正常，数据写在远程库里"
+        )
+
+    lines = ["数据库后端：SQLite（本地文件）", f"文件：{info['target']}"]
+    if info.get("degraded"):
+        lines += [
+            "",
+            "⚠ 本来要连 MySQL，但连接失败，已自动降级到本地",
+            f"原因：{info.get('reason') or '未知'}",
+            "后果：数据只存在这台机器上，搭档和服务器都看不到",
+        ]
+    else:
+        lines.append("（DB_HOST=none，属于主动选择的本地模式）")
+
+    await db_cmd.finish("\n".join(lines))

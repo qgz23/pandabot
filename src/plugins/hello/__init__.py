@@ -1,4 +1,4 @@
-from nonebot import on_command
+from nonebot import on_command, on_message
 from nonebot.adapters.qq import MessageEvent
 
 hello = on_command("hello", aliases={"你好", "hi"}, priority=5)
