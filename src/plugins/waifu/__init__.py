@@ -28,6 +28,16 @@
 配置在 settings.json 的 "waifu" 段，改完约 3 秒热生效：
     upload_reward        每次上传奖励积分（默认 5）
     daily_reward_limit   每人每天最多拿几次上传奖励（默认 5，防刷分）
+    pool_scope           per_group（默认，各群独立）| shared（所有群共用一个池子）
+    pool_root            池子放在哪。默认 data/waifu（相对项目根），
+                         可以指到网盘/同步目录实现跨机器共享
+
+**共享池怎么工作**：
+    池子 = 一个 JSON 文件 + 一批平铺的图。pool_scope=shared 时所有群都读 shared.json。
+    第一次切过去会自动把现存的分群池合并进来（只合并一次，有标记文件），
+    之后新上传直接进共享池。切换不搬图片文件，所以不存在"搬到一半崩了"。
+    注意：抽签种子仍然带真实群号，所以不同群抽到的"今日"是各自独立的，
+    共享的只是素材池——同一群当天结果照样稳定。
 """
 
 from datetime import date
@@ -40,18 +50,37 @@ from nonebot.params import CommandArg
 from src.plugins.settings.config import get
 from src.plugins.userstore.store import store
 
-from .roles import RoleError, roles
+from .roles import SHARED_KEY, RoleError, roles
 from .service import draw, to_text
 
 driver = get_driver()
+
+# 池子位置交给配置决定：改 pool_root 就能把素材挪到网盘/同步目录，
+# 跨机器共享同一批图靠的就是这个（roles.py 自己不读配置，保持可单独测试）
+roles.set_root_provider(lambda: get("waifu.pool_root", "") or None)
 
 # 上传奖励的每日计数：{uid: (日期, 今天已领次数)}
 # 只放内存，重启就清零——刷分的人不会为了多几分去重启 bot
 _reward_log: dict[str, tuple[str, int]] = {}
 
+_SHARED_ALIASES = {"shared", "global", "all", "公共", "共享", "全局"}
+
 
 def _group_openid(event: MessageEvent) -> str:
     return str(getattr(event, "group_openid", "") or "")
+
+
+def _is_shared() -> bool:
+    return str(get("waifu.pool_scope", "per_group") or "per_group").strip().lower() in _SHARED_ALIASES
+
+
+def _pool_key(group: str) -> str:
+    """真实群号 → 读哪个池子。共享模式下所有群都映射到同一个 key。"""
+    return SHARED_KEY if _is_shared() else group
+
+
+def _pool_label() -> str:
+    return "全群共享角色池" if _is_shared() else "本群角色池"
 
 
 def _nickname(event: MessageEvent) -> str:
@@ -158,7 +187,7 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
     try:
         data = await roles.download(urls[0])
         role = await roles.add(
-            group, name, data, line=line, uploader=openid, uploader_name=nick
+            _pool_key(group), name, data, line=line, uploader=openid, uploader_name=nick
         )
     except RoleError as e:
         await upload_cmd.finish(str(e))
@@ -184,14 +213,14 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
         else:
             reward_text = "\n今天的上传奖励已经拿满了，但角色照样收录～"
 
-    pool = await roles.list_roles(group)
+    pool = await roles.list_roles(_pool_key(group))
     same = sum(1 for r in pool if r.name == role.name)
     distinct = len({r.name for r in pool})
     extra = f"，「{role.name}」现在有 {same} 张图" if same > 1 else ""
 
     await upload_cmd.finish(
         f"已收录「{role.name}」{extra}\n"
-        f"本群共 {distinct} 个角色 / {len(pool)} 张图{reward_text}"
+        f"{_pool_label()}共 {distinct} 个角色 / {len(pool)} 张图{reward_text}"
     )
 
 
@@ -215,7 +244,9 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
         await remove_cmd.finish("要删哪个？\n用法：/删除老婆 角色名（只会删掉你自己传的）")
 
     try:
-        count, name = await roles.remove(group, keyword, requester=event.get_user_id())
+        count, name = await roles.remove(
+            _pool_key(group), keyword, requester=event.get_user_id()
+        )
     except RoleError as e:
         await remove_cmd.finish(str(e))
 
@@ -237,10 +268,10 @@ async def _(event: MessageEvent):
     if not group:
         await list_cmd.finish("这个玩法要在群里用哦～")
 
-    pool = await roles.list_roles(group)
+    pool = await roles.list_roles(_pool_key(group))
     if not pool:
         await list_cmd.finish(
-            "本群还没有角色。\n"
+            f"{_pool_label()}还没有角色。\n"
             "用 /上传老婆 角色名|台词 + 一张图 就能加进来，上传还能拿积分～"
         )
 
@@ -251,7 +282,7 @@ async def _(event: MessageEvent):
     names = sorted(buckets)
 
     show = names[:30]
-    lines = [f"本群角色池：{len(names)} 个角色 · {len(pool)} 张图"]
+    lines = [f"{_pool_label()}：{len(names)} 个角色 · {len(pool)} 张图"]
     for i, name in enumerate(show, 1):
         items = buckets[name]
         who = "、".join(sorted({x.by_name for x in items if x.by_name}))
@@ -274,7 +305,7 @@ async def _play(cmd, event: MessageEvent, salt: str) -> None:
     if not group:
         await cmd.finish("这个玩法要在群里用哦～")
 
-    pool = await roles.list_roles(group)
+    pool = await roles.list_roles(_pool_key(group))
     result = draw(
         date_str=date.today().isoformat(),
         group_openid=group,
@@ -285,11 +316,11 @@ async def _play(cmd, event: MessageEvent, salt: str) -> None:
 
     if result is None:
         await cmd.finish(
-            "本群还没有角色，抽不出来。\n"
+            f"{_pool_label()}还没有角色，抽不出来。\n"
             "用 /上传老婆 角色名|台词 + 一张图 加一个，上传还能拿积分～"
         )
 
-    photo = await roles.send_ready(group, result.image) if result.image else None
+    photo = await roles.send_ready(_pool_key(group), result.image) if result.image else None
 
     # 先发原图，再发文字。两件事分开：图就是图，字就是字。
     if photo:
@@ -316,6 +347,38 @@ husband_cmd = on_command("今日老公", aliases={"我的老公"}, priority=10)
 @husband_cmd.handle()
 async def _(event: MessageEvent):
     await _play(husband_cmd, event, salt="husband")
+
+
+@driver.on_startup
+async def _bootstrap_shared_pool() -> None:
+    """切到共享模式后的第一次启动：把现存的分群池并进来。
+
+    只做一次（成功后写标记文件）。理由是合并按 id 去重虽然幂等，
+    但用户从共享池里删掉的角色会被分群池的旧记录"复活"，那就说不清了。
+    """
+    if not _is_shared():
+        return
+
+    marker = roles.shared_marker()
+    if marker.exists():
+        return
+
+    try:
+        merged, sources = await roles.merge_pools(SHARED_KEY)
+    except Exception:
+        logger.exception("角色池合并失败，下次启动再试")
+        return
+
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{merged} 条 / {sources} 个池\n", encoding="utf-8")
+    except OSError:
+        logger.debug("共享池标记文件写入失败，不影响使用", exc_info=True)
+
+    logger.info(
+        f"角色池已切换为共享模式：从 {sources} 个分群池合并 {merged} 条记录，"
+        f"位置 {roles.root}"
+    )
 
 
 @driver.on_shutdown

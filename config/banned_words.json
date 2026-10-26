@@ -1,0 +1,45 @@
+{
+  "_说明": [
+    "categories：分类名 → 敏感词列表，命中任意一个就按 actions 处理",
+    "actions.recall：撤回违规消息（需要机器人是群管理员）",
+    "actions.notify：撤回后在群里说一句；notify_cooldown_seconds 是同群提示冷却，防刷屏",
+    "whitelist：豁免词。匹配前先把它们从消息里挖掉，防止「颜色」被「色」误伤",
+    "groups：留空 = 所有群生效；填群 openid 则只在这些群生效",
+    "以 _ 开头的键是注释，不会被当成分类"
+  ],
+  "enabled": true,
+  "actions": {
+    "recall": true,
+    "notify": true,
+    "notify_text": "已处理一条违规消息",
+    "notify_cooldown_seconds": 30
+  },
+  "groups": [],
+  "whitelist": [
+    "颜色",
+    "色彩",
+    "色谱",
+    "出色",
+    "特色"
+  ],
+  "categories": {
+    "广告": [
+      "加微信",
+      "加v",
+      "私聊我",
+      "代练",
+      "刷钻",
+      "低价出",
+      "扫码进群",
+      "免费领取"
+    ],
+    "骂人": [
+      "傻逼",
+      "沙比",
+      "草泥马",
+      "nmsl",
+      "cnm"
+    ],
+    "其他": []
+  }
+}

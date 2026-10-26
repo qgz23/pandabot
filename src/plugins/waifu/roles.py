@@ -20,8 +20,14 @@
        塞一个列表进去会把搭档的表设计搞乱。
 
 存储结构：
-    data/waifu/{group_openid}.json           本群角色列表
-    data/waifu/img/{group_openid}/{id}.jpg   角色图（扩展名按原格式，可能是 .jpg/.png/.gif）
+    data/waifu/{pool_key}.json     角色列表（pool_key 默认是群 openid，共享模式下是 shared）
+    data/waifu/img/{id}.jpg        角色图（**平铺，不按群分目录**）
+
+图片为什么平铺：
+    共享池的本质是「多个池子读同一批记录」。如果图按群分目录，切到共享模式就得
+    把几十张图搬一遍，搬一半崩了就是数据半残。平铺之后「共享」只等于换一个 JSON 文件名，
+    文件一个都不用动——这是让共享变成一行配置的关键。
+    老数据在 img/{group}/ 下，image_path() 会自动兜底找到，不需要迁移。
 
 **不依赖 nonebot**，可脱离 bot 直接测。
 """
@@ -50,6 +56,14 @@ MAX_VARIANTS_PER_UPLOADER = 5          # 同一个人对同一个角色最多传
 # QQ 能直接显示的格式：原样存、原样发，一个字节都不动
 _RAW_OK = {"JPEG": ".jpg", "PNG": ".png", "GIF": ".gif"}
 
+# 项目根目录（pandabot/）。默认池子挂在它下面，
+# 而不是挂在「当前工作目录」下面——否则换个目录启动 bot，角色池就凭空消失了。
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_ROOT = PROJECT_ROOT / "data" / "waifu"
+
+# 共享池的固定 key（所有群都读这一个）
+SHARED_KEY = "shared"
+
 
 @dataclass(frozen=True)
 class Role:
@@ -71,17 +85,71 @@ class RoleError(Exception):
 
 
 class RoleStore:
-    def __init__(self, root: str | Path = "data/waifu") -> None:
-        self.root = Path(root)
+    def __init__(self, root: str | Path | None = None, root_provider=None) -> None:
+        """
+        root           固定根目录；不给就用 DEFAULT_ROOT
+        root_provider  可调用对象，返回根目录（用于配置文件热改）。
+                       设为「返回空」时回退 DEFAULT_ROOT。
+        """
+        self._default_root = Path(root) if root else DEFAULT_ROOT
+        self._root_provider = root_provider
         self._lock = asyncio.Lock()          # 串行化 JSON 读写，避免并发上传互相覆盖
         self._client: httpx.AsyncClient | None = None
+
+    def set_root_provider(self, fn) -> None:
+        """让外部（插件层）把配置接进来，roles.py 自己不依赖 nonebot/settings。"""
+        self._root_provider = fn
+
+    @property
+    def root(self) -> Path:
+        raw = None
+        if self._root_provider is not None:
+            try:
+                raw = self._root_provider()
+            except Exception:
+                raw = None
+        if not raw:
+            return self._default_root
+        path = Path(str(raw)).expanduser()
+        # 相对路径一律相对项目根，跟启动时的工作目录无关
+        return path if path.is_absolute() else (PROJECT_ROOT / path)
 
     # ---------------- 路径 ----------------
     def _json_path(self, group: str) -> Path:
         return self.root / f"{group}.json"
 
     def image_path(self, group: str, filename: str) -> Path:
-        return self.root / "img" / group / filename
+        """图片路径。新图平铺在 img/ 下，老数据在 img/{群}/ 下。
+
+        切到共享池后 group 变成 "shared"，按群拼路径就找不到老图了，
+        所以最后兜底把 img/ 下的子目录挨个找一遍——目录只有个位数，开销可以忽略。
+        """
+        if not filename:
+            return self.root / "img" / filename
+
+        flat = self.root / "img" / filename
+        if flat.exists():
+            return flat
+
+        direct = self.root / "img" / group / filename
+        if direct.exists():
+            return direct
+
+        img_dir = self.root / "img"
+        if img_dir.exists():
+            for folder in sorted(p for p in img_dir.glob("*") if p.is_dir()):
+                cand = folder / filename
+                if cand.exists():
+                    return cand
+        return flat
+
+    def shared_marker(self) -> Path:
+        """共享池初始化标记。存在就说明已经合并过，不再重复合并。
+
+        为什么需要它：合并按 id 去重虽然幂等，但用户从共享池里删掉的角色，
+        下次启动会被分群池的记录「复活」。有了标记就只合并一次，删了就是删了。
+        """
+        return self.root / ".shared_merged"
 
     # ---------------- 下载 ----------------
     async def _ensure_client(self) -> httpx.AsyncClient:
@@ -217,7 +285,7 @@ class RoleStore:
                 at=datetime.now().isoformat(timespec="seconds"),
             )
 
-            folder = self.root / "img" / group
+            folder = self.root / "img"
             folder.mkdir(parents=True, exist_ok=True)
             target = folder / role.image
             tmp = target.with_suffix(target.suffix + ".tmp")
@@ -267,6 +335,41 @@ class RoleStore:
                 pass
 
         return len(mine), keyword
+
+    async def merge_pools(self, target: str = SHARED_KEY) -> tuple[int, int]:
+        """把现有的所有分群池合并进 target 池。
+
+        只搬「元数据」——图片本来就平铺共用，一个文件都不用移动。
+        返回 (合并的记录条数, 参与合并的源池个数)。
+        """
+        async with self._lock:
+            items = await asyncio.to_thread(self._read, target)
+            seen_id = {str(i.get("id")) for i in items}
+            seen_img = {str(i.get("image")) for i in items if i.get("image")}
+
+            merged = 0
+            sources = 0
+            for path in sorted(self.root.glob("*.json")):
+                if path.stem == target:
+                    continue
+                sources += 1
+                for item in await asyncio.to_thread(self._read, path.stem):
+                    rid = str(item.get("id") or "")
+                    img = str(item.get("image") or "")
+                    if not rid or rid in seen_id or (img and img in seen_img):
+                        continue
+                    record = dict(item)
+                    # 留一句来源，合并后还能看出这张图是哪个群传的
+                    record.setdefault("from_group", path.stem)
+                    items.append(record)
+                    seen_id.add(rid)
+                    if img:
+                        seen_img.add(img)
+                    merged += 1
+
+            if merged:
+                await asyncio.to_thread(self._write, target, items)
+            return merged, sources
 
     async def read_bytes(self, group: str, filename: str) -> bytes | None:
         """原始文件字节。找不到返回 None。"""

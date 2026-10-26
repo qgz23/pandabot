@@ -1,10 +1,9 @@
 {
   "checkin_gain": 10,
-  "hello_replies": [
-    "你好呀小熊猫！有什么我可以帮到你的吗？",
-    "找我有事吗？",
-    "今天也要元气满满哦～"
-  ],
+  "hello": {
+    "enabled": true,
+    "replies_file": "config/replies.json"
+  },
   "features": {
     "checkin_enabled": true
   },
@@ -22,7 +21,9 @@
   "waifu": {
     "enabled": true,
     "upload_reward": 5,
-    "daily_reward_limit": 5
+    "daily_reward_limit": 5,
+    "pool_scope": "shared",
+    "pool_root": "data/waifu"
   },
   "daily": {
     "enabled": true,
@@ -43,5 +44,19 @@
   "couple": {
     "enabled": true,
     "pool_limit": 300
+  },
+  "broadcast": {
+    "enabled": true,
+    "config_file": "config/broadcast.json",
+    "state_file": "data/broadcast/state.json"
+  },
+  "admin": {
+    "enabled": true,
+    "allow_roles": ["owner", "admin"],
+    "default_mute_minutes": 10
+  },
+  "filter": {
+    "enabled": true,
+    "words_file": "config/banned_words.json"
   }
 }
