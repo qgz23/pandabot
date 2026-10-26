@@ -263,7 +263,10 @@ Ok "Git : $((& git --version))"
 Step 2 "拉取代码到 $Target"
 
 if (Test-Path $Target) {
-    if (Test-Path (Join-Path $Target ".git")) {
+    $hasGit = Test-Path (Join-Path $Target ".git")
+    $hasBot = Test-Path (Join-Path $Target "bot.py")
+
+    if ($hasGit) {
         Ok "目录已存在且是 git 仓库，执行 pull"
         Push-Location $Target
         try {
@@ -284,8 +287,14 @@ if (Test-Path $Target) {
         } finally {
             Pop-Location
         }
+    } elseif ($hasBot) {
+        # 手动上传模式：用户把整个项目文件夹拷过来（或者解压了离线包）。
+        # 这种目录没有 .git，不能 pull，但代码是全的，直接把剩下几步跑完就行 ——
+        # 不能因为「不是 git 仓库」就拒绝安装，那会让离线部署走不通。
+        Ok "目录已存在且有 bot.py，按「手动上传模式」继续（没有 .git，不做 pull）"
+        Warn "以后更新代码要重新上传覆盖，脚本不会自动拉取"
     } else {
-        Die "目录 $Target 已存在但不是 git 仓库。为安全起见本脚本不删目录，请你确认后手动处理。"
+        Die "目录 $Target 已存在，但既不是 git 仓库、也没有 bot.py。为安全起见本脚本不删目录，请你确认后手动处理。"
     }
 } else {
     $parent = Split-Path -Parent $Target
@@ -321,9 +330,40 @@ $venvPy = Join-Path $venvPath "Scripts\python.exe"
 # ============================================================
 Step 3 "创建虚拟环境并安装依赖"
 
+$venvUsable = $false
 if (Test-Path $venvPy) {
-    Ok "虚拟环境已存在：$venvPath"
-} else {
+    # 光看文件在不在不够。虚拟环境里写死了创建时的解释器路径，
+    # 从别的机器（或别的目录）拷过来的 .venv 在服务器上通常是坏的 ——
+    # 表现是执行 python.exe 直接报「不是此操作系统平台的有效应用程序」。
+    #
+    # 注意：这种错误是 ApplicationFailedException（终止性错误），
+    # 脚本全局 ErrorActionPreference = "Stop" 会直接终止整个脚本。
+    # 所以这里必须临时切成 Continue 再 try 兜住 —— 否则「检查一下 venv 好不好」
+    # 自己把部署搞挂了。
+    Write-Host "      检查现有 .venv 是否可用..." -ForegroundColor DarkGray
+    $probe = $null
+    $oldEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $probe = & $venvPy -c "print('venv-ok')" 2>$null
+    } catch {
+        $probe = $null
+    } finally {
+        $ErrorActionPreference = $oldEAP
+    }
+
+    if ("$probe" -match "venv-ok") {
+        $venvUsable = $true
+        Ok "虚拟环境已存在且可用：$venvPath"
+    } else {
+        Warn "现有 .venv 跑不起来（多是从别的机器拷过来的），删掉重建"
+        $ErrorActionPreference = "Continue"
+        try { Remove-Item $venvPath -Recurse -Force } catch { }
+        $ErrorActionPreference = $oldEAP
+    }
+}
+
+if (-not $venvUsable) {
     & $py.Exe -m venv $venvPath
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPy)) { Die "创建虚拟环境失败：$venvPath" }
     Ok "已创建 $venvPath"
