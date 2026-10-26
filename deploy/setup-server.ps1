@@ -247,15 +247,16 @@ if (-not $py) {
 }
 Ok "Python : $($py.Version)  $($py.Exe)"
 
-# ---- Git ----
+# ---- Git（可选）----
+# Git 只在「从远端 clone / pull」时才用到。离线包解压部署走的是手动上传模式，
+# 全程不需要 Git —— 所以这里不能硬性 exit，否则离线部署会被第一道门直接挡死。
 $git = Get-Command git -ErrorAction SilentlyContinue
-if (-not $git) {
-    Bad "没找到 Git。"
-    Write-Host "  下载 https://git-scm.com/download/win 装上即可（一路默认）。" -ForegroundColor Yellow
-    Write-Host "  或者：winget install --id Git.Git -e" -ForegroundColor DarkGray
-    exit 1
+if ($git) {
+    Ok "Git   : $((& git --version))"
+} else {
+    Warn "没找到 Git。代码已经手动放好的话不影响部署；只在需要自动 clone/pull 时才装。"
+    Write-Host "  装法（可选）：winget install --id Git.Git -e    或 https://git-scm.com/download/win" -ForegroundColor DarkGray
 }
-Ok "Git : $((& git --version))"
 
 # ============================================================
 # 2. 拉代码
@@ -263,10 +264,24 @@ Ok "Git : $((& git --version))"
 Step 2 "拉取代码到 $Target"
 
 if (Test-Path $Target) {
+    # 常见坑：资源管理器右键「全部解压缩」会多套一层同名目录，
+    # 结果 bot.py 落在 $Target\pandabot-deploy\bot.py 而不是 $Target\bot.py。
+    # 唯一子目录能确定时自动下钻一层，省得用户手动搬文件。
+    if (-not (Test-Path (Join-Path $Target "bot.py")) -and -not (Test-Path (Join-Path $Target ".git"))) {
+        $subs = @(Get-ChildItem -Path $Target -Directory -ErrorAction SilentlyContinue |
+                  Where-Object { Test-Path (Join-Path $_.FullName "bot.py") })
+        if ($subs.Count -eq 1) {
+            $Target = $subs[0].FullName
+            Ok "检测到代码在子目录里（压缩包多套了一层），已自动切到 $Target"
+        }
+    }
     $hasGit = Test-Path (Join-Path $Target ".git")
     $hasBot = Test-Path (Join-Path $Target "bot.py")
 
     if ($hasGit) {
+        if (-not $git) {
+            Die "目录 $Target 是 git 仓库，但系统里没有 git 命令，无法 pull 更新。请先装 Git（winget install --id Git.Git -e），或把该目录删掉改用手动上传模式。"
+        }
         Ok "目录已存在且是 git 仓库，执行 pull"
         Push-Location $Target
         try {
@@ -297,6 +312,22 @@ if (Test-Path $Target) {
         Die "目录 $Target 已存在，但既不是 git 仓库、也没有 bot.py。为安全起见本脚本不删目录，请你确认后手动处理。"
     }
 } else {
+    # 目录还不存在 —— 只能靠 git clone。没 Git 就直接把离线包的路指清楚，
+    # 别丢一句「没找到 Git」让用户在服务器上抓瞎。
+    if (-not $git) {
+        Bad "目录 $Target 不存在，且系统没有 Git，没法自动克隆代码。"
+        Write-Host ""
+        Write-Host "  改走离线包（不用装 Git，5 分钟搞定）：" -ForegroundColor Yellow
+        Write-Host "    ① 把本机的 pandabot-deploy.zip 拷到服务器" -ForegroundColor Yellow
+        Write-Host "    ② 解压到 $Target（解压后必须有 $Target\bot.py）" -ForegroundColor Yellow
+        Write-Host "    ③ 重新运行本脚本，它会自动识别成「手动上传模式」继续" -ForegroundColor Yellow
+        Write-Host ""
+        Write-Host "  解压命令：" -ForegroundColor Cyan
+        Write-Host "    Expand-Archive -Path <zip路径> -DestinationPath $Target -Force" -ForegroundColor DarkGray
+        Write-Host ""
+        Write-Host "  硬要装 Git 也行：winget install --id Git.Git -e  （装完关掉 PowerShell 重开）" -ForegroundColor DarkGray
+        exit 1
+    }
     $parent = Split-Path -Parent $Target
     if ($parent -and -not (Test-Path $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
 
@@ -622,7 +653,13 @@ Write-Host "    schtasks /run    /tn PandaBot" -ForegroundColor DarkGray
 Write-Host "    schtasks /delete /tn PandaBot /f" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  以后更新代码：" -ForegroundColor Cyan
-Write-Host "    cd $root; git pull; schtasks /end /tn PandaBot; schtasks /run /tn PandaBot" -ForegroundColor DarkGray
+if ($git -and (Test-Path (Join-Path $root ".git"))) {
+    Write-Host "    cd $root; git pull; schtasks /end /tn PandaBot; schtasks /run /tn PandaBot" -ForegroundColor DarkGray
+} else {
+    Write-Host "    重新传一份代码覆盖目录，然后：" -ForegroundColor DarkGray
+    Write-Host "    schtasks /end /tn PandaBot; schtasks /run /tn PandaBot" -ForegroundColor DarkGray
+    Write-Host "    （这个目录不是 git 仓库，别指望 git pull）" -ForegroundColor DarkGray
+}
 Write-Host ""
 Write-Host "  ★ 重要：部署完把本地那个 bot 停掉（Ctrl+C 或关掉 nb run 窗口）。" -ForegroundColor Yellow
 Write-Host "    同一个机器人在两处同时连，群里会出现重复回复。" -ForegroundColor Yellow
