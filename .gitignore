@@ -12,3 +12,6 @@ dist/
 
 # SQLite 运行时本地数据
 data/
+
+# deploy/update.ps1 覆盖前自动留底的历史配置
+config/_backup_*/
