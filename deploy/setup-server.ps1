@@ -622,7 +622,16 @@ if ($NoService) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $installer
     $code = $LASTEXITCODE
     Pop-Location
-    if ($code -ne 0) { Die "注册计划任务失败（退出码 $code）" }
+    if ($code -ne 0) {
+        Bad "注册计划任务失败（退出码 $code）"
+        Write-Host "      如果上面刷的是 ParserError / Unexpected token，那是 install-service.ps1 的" -ForegroundColor Yellow
+        Write-Host "      UTF-8 BOM 丢了：PS 5.1 会按 GBK 读这个文件，中文注释行末尾的半截字节" -ForegroundColor Yellow
+        Write-Host "      把换行吃掉，后面的反引号续行表达式就被拆散，报错行号还会少 1。" -ForegroundColor Yellow
+        Write-Host "      不用管它，直接手工注册（复制粘贴下面两条）：" -ForegroundColor Yellow
+        Write-Host "        schtasks /create /tn PandaBot /tr `"$root\deploy\run-bot.cmd`" /sc onstart /ru SYSTEM /rl HIGHEST /f" -ForegroundColor DarkGray
+        Write-Host "        schtasks /run /tn PandaBot" -ForegroundColor DarkGray
+        Die "注册开机自启失败"
+    }
     Ok "开机自启已注册，任务名 PandaBot"
 }
 

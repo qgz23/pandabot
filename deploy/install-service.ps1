@@ -1,4 +1,4 @@
-# ============================================================
+﻿# ============================================================
 #  Register PandaBot as a Windows scheduled task.
 #
 #  Why a scheduled task instead of a Windows service:
