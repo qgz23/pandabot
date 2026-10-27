@@ -58,5 +58,8 @@
   "filter": {
     "enabled": true,
     "words_file": "config/banned_words.json"
+  },
+  "menu": {
+    "image": true
   }
 }

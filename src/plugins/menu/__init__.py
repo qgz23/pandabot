@@ -2,72 +2,47 @@
 """
 功能菜单 / 帮助
 ================================================================
-    /帮助               完整菜单（默认）
-    /帮助 舞萌          只看某一块的详细说明（含别名）
+    /帮助               完整菜单（默认出图）
+    /帮助 舞萌          只看某一块的详细说明（含别名），也出图
     /help 3             也支持用序号
 
-为什么用纯文本而不是出图：命令多的时候图片字号小、群里看不清，
-文本还能直接复制命令。
+默认发图：1080 宽的长图，命令 + 一句话说明，手机上看着比一屏文字舒服。
+settings.json 里把 menu.image 设成 false 就退回纯文字。
+出图或发图的任何一步炸了都会自动回退文字 —— 菜单是用户唯一能自己找答案的地方，
+不能因为画个图把命令搞哑。
 
 排版靠「分组 + 按半角宽度对齐」。中文/全角按 2 个半角算，
 否则 /今日老婆 和 /今日超能力 差一个字，空格数就会差 1 格，菜单看着是歪的。
+（图片版是按像素对齐的，不受这个影响；文字版仍然需要。）
 
 启动时会做一次自检：菜单里声明了但实际没加载成功的插件，会在日志里告警。
 原因很现实——插件报错没起来时，NoneBot 只是少加载一个插件，不会主动告诉你，
 而菜单看起来一切正常，用户发了没反应，你就得一个个猜。
 """
 
+import asyncio
+
 from nonebot import get_driver, on_command
-from nonebot.adapters.qq import MessageEvent
+from nonebot.adapters.qq import Message, MessageEvent, MessageSegment
 from nonebot.log import logger
 from nonebot.params import CommandArg
 from nonebot.plugin import get_loaded_plugins
-from nonebot.adapters.qq import Message
 
-from .data import SECTIONS, all_plugins, item_count
+from src.plugins.settings.config import get
 
-# 每个分组的完整条数。resolve() 可能只返回组内一部分，
-# build_section() 靠它判断该不该标「相关 n 条」。
-_SECTION_SIZE = {section: len(items) for section, items in SECTIONS}
-
-# 用法列的目标宽度，单位是「半角字符」
-WIDTH_HALF = 26
+from . import render
 
 # 命令 -> 别名。只在「分组详情」里显示，总览页不显示——
-# 30 条命令全带上别名会把菜单撑到两屏，反而看不清。
-ALIASES: dict[str, str] = {
-    "今日老婆": "老婆 · 我的老婆",
-    "今日老公": "我的老公",
-    "群友老婆": "群友对象 · 抽群友",
-    "上传老婆": "上传角色 · 添加老婆",
-    "老婆列表": "角色列表 · 老婆池",
-    "删除老婆": "删除角色 · 删老婆",
-    "今日运势": "运势 · 今日签",
-    "今日猪猪": "猪猪 · 今日猪",
-    "今日超能力": "超能力 · 我的超能力",
-    "今日doro": "doro · Doro",
-    "哈基米": "hakimi · 今日哈基米",
-    "猜数字": "猜数",
-    "猜拳": "",
-    "骰子": "roll · 掷骰",
-    "招呼": "你好 · hi",
-    "b50": "B50 · 查分",
-    "查歌": "搜歌 · 找歌",
-    "绑定舞萌": "绑舞萌 · 绑定b50",
-    "解绑舞萌": "解绑b50",
-    "舞萌帮助": "maimai帮助 · b50帮助",
-    "信息": "个人信息 · 名片",
-    "录入信息": "信息录入 · 录入",
-    "改CN": "改cn · 修改cn · 换cn · 改名字",
-    "改组别": "改组 · 换组别 · 改部门",
-    "签到": "打卡 · checkin",
-    "积分": "我的积分 · score",
-    "我的信息": "me · 我的资料",
-    "记录": "note · 记下",
-    "帮助": "菜单 · help · 指令",
-    "重载配置": "reload",
-    "数据库状态": "数据库 · db状态",
-}
+# 40 多条命令全带上别名会把菜单撑到两屏，反而看不清。
+# 定义在 data.py 而不是这里：那边不依赖 nonebot，渲染脚本能直接拿来测版式。
+from .data import ALIASES, SECTIONS, all_plugins, item_count
+
+# 每个分组的完整条数。resolve() 可能只返回组内一部分，
+# build_section() / render_section() 靠它判断该不该标「相关 n 条」。
+_SECTION_SIZE = {section: len(items) for section, items in SECTIONS}
+
+# 文字版用法列的目标宽度，单位是「半角字符」
+WIDTH_HALF = 26
 
 # 关键词同义词：老叫法/口语 -> 标准命令名。
 # 只在 resolve() 里用，不影响菜单显示。
@@ -194,15 +169,56 @@ def resolve(raw: str):
 help_cmd = on_command("熊猫娘帮助", aliases={"帮助", "菜单", "help", "指令"}, priority=5)
 
 
+def _dedup(groups) -> list[tuple[int, str, tuple]]:
+    """同一组只留一份（resolve 的模糊匹配可能让一个组出现两次）。"""
+    seen: set[str] = set()
+    out: list[tuple[int, str, tuple]] = []
+    for i, section, items in groups:
+        if section in seen:
+            continue
+        seen.add(section)
+        out.append((i, section, items))
+    return out
+
+
+def _build_text(groups) -> str:
+    if groups is None:
+        return build_menu()
+    return "\n".join(
+        build_section(i, section, items) for i, section, items in _dedup(groups)
+    ).strip()
+
+
+def _draw(groups) -> tuple[bytes, str]:
+    """渲染帮助图，返回 (PNG 字节, 文件名)。同步函数，调用方丢线程里跑。"""
+    if groups is None:
+        sections = [(i, s, it) for i, (s, it) in enumerate(SECTIONS, 1)]
+        return render.render_overview(sections, total=item_count()), "menu.png"
+
+    picked = _dedup(groups)
+    if len(picked) == 1:
+        idx, section, items = picked[0]
+        png = render.render_section(
+            idx,
+            section,
+            items,
+            total_in_section=_SECTION_SIZE.get(section, len(items)),
+            aliases=ALIASES,
+        )
+        return png, f"menu-{idx}.png"
+
+    # 命中多个组：套用总览版式，一张图里排完，别连发好几张刷屏
+    total = sum(len(items) for _i, _s, items in picked)
+    return render.render_overview(picked, total=total), "menu-hit.png"
+
+
 @help_cmd.handle()
 async def _(event: MessageEvent, arg: Message = CommandArg()):
     keyword = arg.extract_plain_text().strip()
     groups = resolve(keyword)
 
-    if groups is None:
-        await help_cmd.finish(build_menu())
-
-    if not groups:
+    # 一个都没匹配上：要让用户看组名去挑，这种场景文字比图清楚
+    if groups is not None and not groups:
         names = " · ".join(s for s, _ in SECTIONS)
         await help_cmd.finish(
             f"没找到「{keyword}」相关的指令。\n\n"
@@ -210,16 +226,15 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
             f"或者不带参数发 /帮助 看全部"
         )
 
-    # 关键词命中多组时全给（比如「老婆」会命中娱乐组里的好几条，只出一份）
-    seen: set[str] = set()
-    parts: list[str] = []
-    for i, section, items in groups:
-        if section in seen:
-            continue
-        seen.add(section)
-        parts.append(build_section(i, section, items))
+    if get("menu.image", True):
+        try:
+            png, fname = await asyncio.to_thread(_draw, groups)
+            await help_cmd.send(MessageSegment.file_image(png, fname))
+            return
+        except Exception:
+            logger.exception("帮助菜单出图失败，改发文字版")
 
-    await help_cmd.finish("\n".join(parts).strip())
+    await help_cmd.finish(_build_text(groups))
 
 
 driver = get_driver()
