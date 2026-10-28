@@ -90,6 +90,19 @@ _COLOR_CN = {
 }
 _ACCENT_FALLBACK = (132, 144, 166)
 
+# 卡类型：官方英文站给的是 Character / Event / Climax
+_KIND_CN = {
+    "character": "角色卡",
+    "event": "事件卡",
+    "climax": "高潮卡",
+}
+
+
+def _kind_cn(kind: str) -> str:
+    if not kind:
+        return "—"
+    return _KIND_CN.get(kind.strip().lower(), kind)
+
 _trig_cache: dict[str, Image.Image] = {}
 
 
@@ -179,10 +192,23 @@ def _stat_panel(draw, x: int, y: int, w: int, h: int, items: list[tuple[str, str
         draw.text((cx, y + 48), value, font=value_font, fill=accent, anchor="ma")
 
 
-def render_card(card: Card, img: bytes | None, icons: dict[str, bytes]) -> bytes:
+def render_card(
+    card: Card,
+    img: bytes | None,
+    icons: dict[str, bytes],
+    name_zh: str = "",
+    text_zh: str = "",
+) -> bytes:
+    """画一张卡。
+
+    name_zh / text_zh 是翻译结果，留空就用英文原文。
+    卡名翻译经常只翻对一半（人名多为音译），所以译名和原名一起显示：
+    大字给中文，小灰字给英文原名，用户能自己对照。
+    """
     probe = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
     name_font = get_font(36, bold=True)
+    sub_name_font = get_font(20)
     no_font = get_font(23)
     rarity_font = get_font(21, bold=True)
     kind_font = get_font(25)
@@ -194,10 +220,18 @@ def render_card(card: Card, img: bytes | None, icons: dict[str, bytes]) -> bytes
     art = _fit_card(img)
 
     # ---- 先量尺寸，再开画布（高度必须跟着内容走）----
-    name_lines = wrap_text(probe, card.name or card.no, name_font, INFO_W, max_lines=3)
-    text_lines = _wrap_paragraphs(probe, card.text, text_font, TEXT_W, 34) if card.text else []
+    main_name = name_zh or card.name or card.no
+    # 副名就是英文原名；跟主名一样时没必要重复显示
+    sub_name = card.name if (name_zh and card.name.strip() != name_zh.strip()) else ""
+    body = text_zh or card.text
 
-    info_h = len(name_lines) * 46 + 10      # 卡名
+    name_lines = wrap_text(probe, main_name, name_font, INFO_W, max_lines=3)
+    sub_lines = wrap_text(probe, sub_name, sub_name_font, INFO_W, max_lines=2) if sub_name else []
+    text_lines = _wrap_paragraphs(probe, body, text_font, TEXT_W, 40) if body else []
+
+    info_h = len(name_lines) * 46           # 卡名
+    info_h += len(sub_lines) * 28 + 6       # 英文原名
+    info_h += 10
     info_h += 34 + 18                       # 卡号 + 稀有度
     info_h += 24                            # 分隔线
     info_h += 46                            # 颜色 + 卡类型
@@ -250,6 +284,9 @@ def render_card(card: Card, img: bytes | None, icons: dict[str, bytes]) -> bytes
     for line in name_lines:
         draw.text((x, y), line, font=name_font, fill=TEXT_MAIN, anchor="la")
         y += 46
+    for line in sub_lines:
+        draw.text((x, y), line, font=sub_name_font, fill=TEXT_FAINT, anchor="la")
+        y += 28
     y += 10
 
     # 卡号 + 稀有度徽章
@@ -276,7 +313,7 @@ def render_card(card: Card, img: bytes | None, icons: dict[str, bytes]) -> bytes
         draw.ellipse((cx - dot_r, cy - dot_r, cx + dot_r, cy + dot_r),
                      fill=_COLOR_RGB.get(c, _ACCENT_FALLBACK))
     kind_x = x + (len(card.colors) * 26 if card.colors else 0)
-    draw.text((kind_x, y), f"{_color_cn(card.colors)}  {card.kind or '—'}",
+    draw.text((kind_x, y), f"{_color_cn(card.colors)}  {_kind_cn(card.kind)}",
               font=kind_font, fill=TEXT_MAIN, anchor="la")
     y += 46
 

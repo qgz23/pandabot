@@ -52,7 +52,10 @@
   },
   "admin": {
     "enabled": true,
-    "allow_roles": ["owner", "admin"],
+    "allow_roles": [
+      "owner",
+      "admin"
+    ],
     "default_mute_minutes": 10
   },
   "filter": {
@@ -72,6 +75,9 @@
     "enabled": true,
     "cooldown_seconds": 5,
     "request_timeout": 25,
-    "search_limit": 10
+    "search_limit": 10,
+    "translate": true,
+    "translate_name": true,
+    "translate_timeout": 8
   }
 }

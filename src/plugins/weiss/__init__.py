@@ -23,6 +23,9 @@ WS（Weiß Schwarz / 黑白双翼）卡查
 
 3. 卡图下载失败也照常出卡。查卡的价值在数据，
    官方图挂了不该让整个功能不可用。
+
+4. 出图前先翻译（translate.py）。翻译和卡图、触发图标并发跑，
+   翻译失败或超时就退回英文，绝不拖累查卡本身。
 """
 
 import asyncio
@@ -37,6 +40,7 @@ from src.plugins.settings.config import get
 
 from .render import render_card, render_candidates
 from .service import Card, load_image, load_parts, pick, search
+from .translate import translate_card
 
 # 每人上次查询时间（monotonic 秒）
 _last_call: dict[str, float] = {}
@@ -61,16 +65,20 @@ def _cooldown_left(uid: str) -> int:
     return 0
 
 
-def _fallback_text(card: Card) -> str:
-    lines = [f"{card.name}", f"卡号：{card.no}  [{card.rarity}]"]
+def _fallback_text(card: Card, name_zh: str = "", text_zh: str = "") -> str:
+    title = name_zh or card.name
+    lines = [title, f"卡号：{card.no}  [{card.rarity}]"]
+    if name_zh and card.name and name_zh != card.name:
+        lines.insert(1, card.name)
     meta = [f"类型 {card.kind}"] if card.kind else []
     if not card.is_climax:
         meta.append(f"等级 {card.level or '—'} 费用 {card.cost or '—'} 力量 {card.power or '—'}")
     meta.append(f"魂 {card.soul or '—'}")
     lines.append("  ".join(meta))
-    if card.text:
+    body = text_zh or card.text
+    if body:
         lines.append("")
-        lines.append(card.text[:600] + ("…" if len(card.text) > 600 else ""))
+        lines.append(body[:600] + ("…" if len(body) > 600 else ""))
     return "\n".join(lines)
 
 
@@ -87,8 +95,12 @@ def _help_text() -> str:
         "卡片内容：官方卡图、颜色、类型、稀有度、\n"
         "等级/费用/力量、魂、触发图标、效果全文。\n"
         "\n"
-        "数据来自官方英文卡表 en.ws-tcg.com，\n"
-        "所以卡名和效果是英文的。卡号三国通用。"
+        "效果已机器翻译成中文，术语按简中卡面校准\n"
+        "（休息室 / 计时区 / 力量 / 魂）。卡名是中英\n"
+        "双行，因为人名音译不一定准，留英文好对照。\n"
+        "\n"
+        "数据来自官方英文卡表 en.ws-tcg.com。\n"
+        "卡号全球通用，日文卡号查不了。"
     )
 
 
@@ -145,20 +157,23 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
             names = "\n".join(f"{c.no}  {c.name}" for c in shown)
             await ws_cmd.finish(f"找到 {len(cards)} 张：\n{names}\n发 /ws 完整卡号 看详情")
 
-    # 出详情：卡图和触发图标并发下载，任何一个失败都不影响出卡
-    img_task = asyncio.create_task(load_image(main))
-    icon_task = asyncio.create_task(load_parts(main.triggers))
-
+    # 出详情：卡图、触发图标、翻译三件事并发，任何一个失败都不影响出卡
     img_bytes = None
     icons: dict[str, bytes] = {}
+    name_zh, text_zh = "", ""
     try:
-        img_bytes, icons = await asyncio.gather(img_task, icon_task)
+        img_bytes, icons, translated = await asyncio.gather(
+            load_image(main),
+            load_parts(main.triggers),
+            translate_card(main),
+        )
+        name_zh, text_zh = translated
     except Exception:
-        logger.debug("WS 素材加载异常，按缺图处理")
+        logger.debug("WS 素材加载异常，按缺图 / 英文处理")
 
     try:
-        png = await asyncio.to_thread(render_card, main, img_bytes, icons)
+        png = await asyncio.to_thread(render_card, main, img_bytes, icons, name_zh, text_zh)
         await ws_cmd.finish(MessageSegment.file_image(png, f"ws_{main.no.replace('/', '_')}.png"))
     except Exception:
         logger.exception("WS 卡片渲染失败，改发文本")
-        await ws_cmd.finish(_fallback_text(main))
+        await ws_cmd.finish(_fallback_text(main, name_zh, text_zh))

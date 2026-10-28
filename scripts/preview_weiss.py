@@ -27,7 +27,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 nonebot.init()
 
-from src.plugins.weiss import render, service  # noqa: E402
+from src.plugins.weiss import render, service, translate  # noqa: E402
 
 OUT_DIR = PROJECT_ROOT.parent / "previews"
 
@@ -60,12 +60,19 @@ async def main(queries: list[str]) -> None:
             png = await asyncio.to_thread(render.render_candidates, q, cards[:10])
             name = f"WS_候选_{q}.png"
         else:
-            img, icons = await asyncio.gather(
-                service.load_image(main_card), service.load_parts(main_card.triggers)
+            img, icons, (zh_name, zh_text) = await asyncio.gather(
+                service.load_image(main_card),
+                service.load_parts(main_card.triggers),
+                translate.translate_card(main_card),
             )
-            png = await asyncio.to_thread(render.render_card, main_card, img, icons)
+            png = await asyncio.to_thread(
+                render.render_card, main_card, img, icons, zh_name, zh_text
+            )
             name = f"WS_{main_card.no.replace('/', '_')}.png"
             print(f"   出图：{main_card.no}  图={'有' if img else '无'}  图标={list(icons)}")
+            print(f"   中文名：{zh_name or '（保留原名）'}")
+            for ln in (zh_text or main_card.text).split("\n"):
+                print(f"     {ln}")
 
         path = OUT_DIR / name
         path.write_bytes(png)
