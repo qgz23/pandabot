@@ -79,5 +79,15 @@
     "translate": true,
     "translate_name": true,
     "translate_timeout": 8
+  },
+  "music": {
+    "enabled": true,
+    "cooldown_seconds": 8,
+    "search_limit": 8,
+    "source": "netease",
+    "bitrate": 128,
+    "max_size_mb": 18,
+    "upload_mode": "auto",
+    "resolve_timeout": 20
   }
 }
