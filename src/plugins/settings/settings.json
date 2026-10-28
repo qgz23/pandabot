@@ -61,5 +61,11 @@
   },
   "menu": {
     "image": true
+  },
+  "arknights": {
+    "enabled": true,
+    "cooldown_seconds": 5,
+    "data_ttl_hours": 168,
+    "search_limit": 8
   }
 }
