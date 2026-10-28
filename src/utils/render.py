@@ -170,8 +170,16 @@ def wrap_text(
         # 避头：行首不能是收尾标点 → 把当前行最后一个字拉下来陪它
         # 避尾：行末不能是起始括号 → 同上，把括号拉到下一行
         if len(current) >= 2 and (ch in _NO_LINE_START or current[-1] in _NO_LINE_END):
-            carry = current[-1]
-            lines.append(current[:-1])
+            cut = len(current) - 1
+            # 拉下来的「最后一个字」如果紧跟在英文/数字后面，不能只拉一个字符，
+            # 否则《Net》会被拆成「《Ne」+「t》」。顺着把整个词一起带下去，
+            # 中文没有这个问题（切点左边是汉字，循环不执行，行为和以前一样）。
+            while cut > 0 and _TOKEN_CH.match(current[cut - 1]):
+                cut -= 1
+            if cut == 0:            # 整行就是一个词，只能硬拆一个字
+                cut = len(current) - 1
+            carry = current[cut:]
+            lines.append(current[:cut])
             current = carry + ch
         else:
             lines.append(current)

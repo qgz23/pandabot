@@ -67,5 +67,11 @@
     "cooldown_seconds": 5,
     "data_ttl_hours": 168,
     "search_limit": 8
+  },
+  "weiss": {
+    "enabled": true,
+    "cooldown_seconds": 5,
+    "request_timeout": 25,
+    "search_limit": 10
   }
 }
