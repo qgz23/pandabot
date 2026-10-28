@@ -121,8 +121,14 @@ def _candidate_text(keyword: str, songs: list[Song], by: str = "") -> str:
     who = f"（{by} 搜的）" if by else ""
     lines = [f"「{keyword}」找到 {len(songs)} 首{who}，回复 /点歌 序号 播放："]
     for i, s in enumerate(songs, 1):
-        album = f"《{s.album}》" if s.album else ""
-        lines.append(f"{i}. {s.name} · {s.artist_text}{('  ' + album) if album else ''}")
+        tail = []
+        if s.duration_text():
+            tail.append(s.duration_text())      # 时长能帮用户认出「只有 30 秒」的片段
+        if s.album:
+            tail.append(f"《{s.album}》")
+        lines.append(
+            f"{i}. {s.name} · {s.artist_text}" + ("  " + "  ".join(tail) if tail else "")
+        )
     return "\n".join(lines)
 
 
@@ -175,8 +181,9 @@ async def _play(matcher, song: Song) -> None:
     mode = str(get("music.upload_mode", "auto") or "auto").lower()
     max_mb = float(get("music.max_size_mb", 18) or 18)
 
-    # 先把「点的是哪首」发出去。取直链实测要 1~13 秒不等（聚合接口不稳定），
-    # 群里干等十几秒会以为 bot 挂了。时长搜索阶段就有，不用等 resolve。
+    # 先把「点的是哪首」发出去。取直链现在多数只要 0.3~0.9 秒，
+    # 但聚合接口那一路偶尔要十几秒，群里干等会以为 bot 挂了。
+    # 时长在搜索阶段就拿到了，不用等 resolve。
     meta = []
     if song.album:
         meta.append(f"《{song.album}》")
