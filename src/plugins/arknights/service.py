@@ -48,6 +48,11 @@ DATA_DIR = PROJECT_ROOT / "data" / "arknights"
 INDEX_PATH = DATA_DIR / "chars.json"
 IMG_DIR = DATA_DIR / "img"
 
+# 精简库结构版本。字段一改就要 +1，否则老缓存配上新代码会读出缺字段的
+# 干员对象（比如 skills 从「字符串列表」变成「字典列表」），
+# 渲染时直接 TypeError，而且报错位置在很远的 render.py，很难查。
+INDEX_VERSION = 6
+
 # 数据源。{name} 由调用方填 character_table / skill_table
 _GAMEDATA_MIRRORS = (
     "https://cdn.jsdelivr.net/gh/Kengxxiao/ArknightsGameData@master/zh_CN/gamedata/excel/{name}.json",
@@ -113,6 +118,9 @@ def clean(text: str) -> str:
     """去掉富文本标签，顺便把连续空白压成一个空格。"""
     if not text:
         return ""
+    # 技能描述里的换行是**字面的反斜杠 + n**（`\\n` 两个字符），不是真换行，
+    # 所以 \s+ 压不掉它。不单独处理的话，卡片上会直接印出 "\n" 两个字符。
+    text = text.replace("\\n", " ")
     return re.sub(r"\s+", " ", _TAG_RE.sub("", text)).strip()
 
 
@@ -182,15 +190,101 @@ def _pick_talents(raw: dict) -> list[dict]:
     return result
 
 
-def _pick_skills(raw: dict, skill_names: dict[str, str]) -> list[str]:
-    """技能名列表。同名技能只留一个（异格干员的共用技能会重复）。"""
-    out: list[str] = []
+# 技能描述里的数值占位符：{key} / {key:0%} / {key:0.0} / {key:0.00}
+_PLACEHOLDER_RE = re.compile(r"\{([^{}:]+)(?::([^{}]+))?\}")
+
+
+def _format_number(value: float, fmt: str) -> str:
+    """按方舟的格式串渲染数值。fmt 是 "0%" / "0.0%" / "0.0" / "0" 这种写法。"""
+    if "%" in fmt:
+        decimals = len(fmt.split(".", 1)[1].rstrip("%")[:3]) if "." in fmt else 0
+        return f"{value * 100:.{decimals}f}%"
+    decimals = len(fmt.split(".", 1)[1][:3]) if "." in fmt else 0
+    if decimals:
+        return f"{value:.{decimals}f}"
+    return f"{value:g}"  # 2.0 -> "2"，不留下 ".0"
+
+
+def format_skill_desc(level: dict) -> str:
+    """把技能描述里的 {占位符} 换成真实数值。
+
+    真实数值在同级 level 的 blackboard 里（[{key, value}]）。
+    找不到对应 key 时直接删掉占位符 —— 宁可少一句话，
+    也不能把 `{sp}` 这种花括号原样印到卡片上。
+
+    **key 大小写要对齐**：描述里写的是 `{HP_RECOVERY_PER_SEC_BY_MAX_HP_RATIO:0.0%}`，
+    blackboard 里却是 `hp_recovery_per_sec_by_max_hp_ratio`。同一份数据里
+    大小写都不统一，所以整张表按小写建，查的时候也转小写。
+    不做这一步，银灰「雪境生存法则」的回复量会直接消失。
+    """
+    desc = level.get("description") or ""
+    if not desc:
+        return ""
+    # 先剥标签再处理换行：原文是「…切换：</>\n攻击范围缩小」，
+    # 带着 </> 的时候「：」和 \n 并不相邻，标点判断会失效，
+    # 结果是冒号后面多出一个逗号（「切换：， 攻击范围缩小」）。
+    desc = _TAG_RE.sub("", desc)
+    # 原文用 \n 分段。直接压成空格会读成「攻击范围内的目标 技能自动开启」，
+    # 两句话粘在一起；所以前面已经有标点的就只留空格，其余补个逗号。
+    desc = re.sub(r"(?<=[。！？；，、：])\\n", " ", desc)
+    desc = desc.replace("\\n", "，")
+    board = {
+        b.get("key", "").lower(): b.get("value")
+        for b in (level.get("blackboard") or [])
+        if isinstance(b, dict) and b.get("key")
+    }
+
+    def repl(match: re.Match) -> str:
+        key = match.group(1).strip()
+        fmt = (match.group(2) or "").strip()
+        # 占位符的 key 可以带一元负号：真银斩写的是 `{-def:0%}`，
+        # 意思是「把 def 取反再显示」。不认这个负号，整个数值会消失，
+        # 卡片上就剩一句「防御力-，」。
+        negate = key.startswith("-")
+        if negate:
+            key = key[1:]
+        if key.lower() not in board:
+            return ""
+        try:
+            value = float(board[key.lower()])
+        except (TypeError, ValueError):
+            return str(board[key.lower()])
+        if negate:
+            value = -value
+        return _format_number(value, fmt)
+
+    return clean(_PLACEHOLDER_RE.sub(repl, desc))
+
+
+def _pick_skills(raw: dict, skill_table: dict) -> list[dict]:
+    """技能：名字 + 效果描述 + 图标 id。
+
+    描述里有一堆数字占位符，形如 `{attack_speed}` `{def:0%}`，
+    真实数值在同级的 blackboard 里（键值对）。不替换的话卡片上会印出花括号。
+
+    数值取**专精三**（levels 最后一个）：图鉴是给人看上限的，
+    1 级描述除了数值小没别的信息，而专精三还多了定性说明。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
     for sk in raw.get("skills") or []:
         sid = sk.get("skillId") or ""
-        name = skill_names.get(sid)
-        if not name or name in out:
+        entry = skill_table.get(sid)
+        if not isinstance(entry, dict) or entry.get("hidden"):
             continue
-        out.append(name)
+        levels = entry.get("levels") or []
+        if not levels:
+            continue
+        name = clean(levels[0].get("name", ""))
+        # 异格干员会和本体共用技能，同名只显示一次
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append({
+            "n": name,
+            "d": format_skill_desc(levels[-1]),
+            "i": sid,   # 图标 id，渲染时拼 URL 用
+        })
     return out
 
 
@@ -222,17 +316,6 @@ def _pick_stats(raw: dict) -> dict[str, Any]:
 
 def build_index(chars_raw: dict, skill_table: dict) -> list[dict]:
     """把两张原始表压成一张精简表。"""
-    # 技能 id → 中文名。skill_table 的键是完整 id（含 [3] 这种等级后缀）
-    skill_names: dict[str, str] = {}
-    for sid, sk in skill_table.items():
-        if not isinstance(sk, dict) or sk.get("hidden"):
-            continue
-        levels = sk.get("levels") or []
-        if levels:
-            name = clean(levels[0].get("name", ""))
-            if name:
-                skill_names[sid] = name
-
     out: list[dict] = []
     for cid, raw in chars_raw.items():
         if not isinstance(raw, dict):
@@ -258,7 +341,7 @@ def build_index(chars_raw: dict, skill_table: dict) -> list[dict]:
             obtain=clean(raw.get("itemObtainApproach", "")),
             stats=_pick_stats(raw),
             talents=_pick_talents(raw),
-            skills=_pick_skills(raw, skill_names),
+            skills=_pick_skills(raw, skill_table),
         )
         out.append(char.to_dict())
 
@@ -345,9 +428,16 @@ class ArknightsIndex:
     def _load_from_disk(self) -> bool:
         try:
             payload = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
-            chars = [Char.from_dict(d) for d in payload.get("chars", [])]
         except Exception as e:
             logger.warning(f"方舟精简库读取失败，将重新下载：{e!r}")
+            return False
+        if payload.get("version") != INDEX_VERSION:
+            logger.info("方舟精简库结构版本变化，重新构建")
+            return False
+        try:
+            chars = [Char.from_dict(d) for d in payload.get("chars", [])]
+        except Exception as e:
+            logger.warning(f"方舟精简库内容损坏，将重新下载：{e!r}")
             return False
         if not chars:
             return False
@@ -364,7 +454,11 @@ class ArknightsIndex:
     def _write_cache(self, chars: list[Char], updated_at: float) -> None:
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
-            payload = {"updated_at": updated_at, "chars": [c.to_dict() for c in chars]}
+            payload = {
+                "version": INDEX_VERSION,
+                "updated_at": updated_at,
+                "chars": [c.to_dict() for c in chars],
+            }
             tmp = INDEX_PATH.with_suffix(".tmp")
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             tmp.replace(INDEX_PATH)  # 原子替换，避免写到一半断电留个坏文件
@@ -471,6 +565,121 @@ async def load_portrait(char_id: str) -> bytes | None:
     except Exception as e:
         logger.debug(f"立绘落盘失败 {char_id}：{e!r}")
     return raw
+
+
+# --------------------------------------------------------------------------
+# 技能图标
+# --------------------------------------------------------------------------
+# 图标文件名和 skillId 不是一一对应，要试两种：
+#     skchr_svrash_2         → skill_icon_skchr_svrash_2.png
+#     skcom_charge_cost[1]   → skill_icon_skcom_charge_cost[1].png  （带方括号！）
+# 通用技能（skcom 开头）的图标文件名里保留了 [等级] 后缀，
+# 所以先试完整 id，404 再去掉 [n] 试一次。
+SKILL_DIR = DATA_DIR / "skill"
+
+_SKILL_MIRRORS = (
+    "https://cdn.jsdelivr.net/gh/yuanyan3060/ArknightsGameResource@main/skill/{name}",
+    "https://gcore.jsdelivr.net/gh/yuanyan3060/ArknightsGameResource@main/skill/{name}",
+    "https://raw.githubusercontent.com/yuanyan3060/ArknightsGameResource/main/skill/{name}",
+)
+
+
+def _icon_candidates(skill_id: str) -> list[str]:
+    """可能的图标文件名，按优先级排。"""
+    names = [f"skill_icon_{skill_id}.png"]
+    base = re.sub(r"\[\d+\]$", "", skill_id)
+    if base != skill_id:
+        names.append(f"skill_icon_{base}.png")
+    return names
+
+
+def skill_icon_path(skill_id: str) -> Path:
+    # [ ] 在 Windows 文件名里能用，但混在路径里容易惹麻烦，统一换掉
+    safe = re.sub(r"[^\w\-.@]", "_", skill_id)
+    return SKILL_DIR / f"{safe}.png"
+
+
+async def fetch_skill_icon(skill_id: str) -> bytes | None:
+    """下载技能图标（128×128，约 15 KB）。
+
+    图标小，但一次要拉三个，并发打同一个 CDN 时偶发断连。
+    所以每个候选文件名给两次机会 —— 重试一次的收益远大于换个镜像
+    （换镜像意味着重新握手，成本更高）。
+    """
+    from urllib.parse import quote
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+        for mirror in _SKILL_MIRRORS:
+            for name in _icon_candidates(skill_id):
+                url = mirror.format(name=quote(name))
+                for _ in range(2):
+                    try:
+                        resp = await client.get(url, headers={"User-Agent": "pandabot/1.0"})
+                        if resp.status_code == 404:
+                            break  # 这个命名不存在，换下一个候选名
+                        resp.raise_for_status()
+                        return resp.content
+                    except httpx.HTTPStatusError:
+                        break
+                    except Exception:
+                        continue  # 超时/断连，同名再试一次
+    return None
+
+
+async def load_skill_icon(skill_id: str) -> bytes | None:
+    """取技能图标字节。磁盘缓存 → 网络 → 放弃（渲染时画占位方块）。"""
+    path = skill_icon_path(skill_id)
+    if path.exists() and path.stat().st_size > 512:
+        return await asyncio.to_thread(path.read_bytes)
+    raw = await fetch_skill_icon(skill_id)
+    if not raw:
+        return None
+    try:
+        SKILL_DIR.mkdir(parents=True, exist_ok=True)
+        await asyncio.to_thread(path.write_bytes, raw)
+    except Exception as e:
+        logger.debug(f"技能图标落盘失败 {skill_id}：{e!r}")
+    return raw
+
+
+# 图片资源（立绘 + 技能图标）的总下载时限。超时就不等了，
+# 发没图的版本 —— 一张立绘值不了 20 秒，用户早就以为 bot 卡死了
+ASSET_TIMEOUT = 20.0
+
+
+async def load_assets(char: Char, timeout: float = ASSET_TIMEOUT) -> tuple[bytes | None, dict[str, bytes]]:
+    """并行拉立绘和技能图标，返回 (立绘, {技能 id: 图标})。
+
+    用 asyncio.wait 而不是 gather + wait_for：超时的时候 gather 会把
+    已经下好的结果一起丢掉，用户就白等了 15 秒。wait 能拿回 done 那批 ——
+    立绘下好了图标没好，至少还能出一张有脸的卡。
+    """
+    plan: dict[asyncio.Task, tuple[str, str]] = {
+        asyncio.create_task(load_portrait(char.id)): ("portrait", "")
+    }
+    for skill in char.skills[:3]:
+        sid = skill.get("i") or ""
+        if sid:
+            plan[asyncio.create_task(load_skill_icon(sid))] = ("icon", sid)
+
+    done, pending = await asyncio.wait(plan.keys(), timeout=timeout)
+    for task in pending:
+        task.cancel()
+
+    portrait: bytes | None = None
+    icons: dict[str, bytes] = {}
+    for task in done:
+        if task.cancelled() or task.exception():
+            continue
+        kind, sid = plan[task]
+        result = task.result()
+        if not result:
+            continue
+        if kind == "portrait":
+            portrait = result
+        else:
+            icons[sid] = result
+    return portrait, icons
 
 
 index = ArknightsIndex()

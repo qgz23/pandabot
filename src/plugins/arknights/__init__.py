@@ -32,7 +32,7 @@ from nonebot.params import CommandArg
 from src.plugins.settings.config import get
 
 from .render import render_card, render_candidates
-from .service import index, load_portrait
+from .service import index, load_assets
 
 driver = get_driver()
 
@@ -41,10 +41,6 @@ _last_call: dict[str, float] = {}
 
 # 后台预热任务要留引用，否则可能被 GC 回收
 _warm_task: asyncio.Task | None = None
-
-# 立绘下载的总时限。超过就不等了，发没图的版本 ——
-# 一张立绘值不了 10 秒的等待，用户早就以为 bot 死了
-PORTRAIT_TIMEOUT = 15.0
 
 
 def _uid(event: MessageEvent) -> str:
@@ -77,7 +73,7 @@ def _fallback_text(char) -> str:
     for talent in char.talents[:3]:
         lines.append(f"天赋 [{talent['name']}] {talent['desc']}")
     if char.skills:
-        lines.append("技能：" + " / ".join(char.skills))
+        lines.append("技能：" + " / ".join(s.get("n", "") for s in char.skills))
     if char.stats:
         st = char.stats
         lines.append(
@@ -95,8 +91,11 @@ def _help_text() -> str:
         "/干员 amiya    英文名也行\n"
         "/方舟更新      拉取最新数据\n"
         "\n"
-        "搜到多个会先列候选，再发全名看详情。\n"
-        "属性口径：最高精英阶段的满级属性。"
+        "卡片内容：立绘、星级、职业分支、阵营、标签、\n"
+        "特性、天赋、技能效果与图标、满级属性。\n"
+        "属性取最高精英阶段的满级值，技能数值按专精三。\n"
+        "\n"
+        "搜到多个会先列候选，再发全名看详情。"
         f"{version}"
     )
 
@@ -167,15 +166,10 @@ async def _(event: MessageEvent, arg: Message = CommandArg()):
 
     char = hits[0]
 
-    portrait = None
-    try:
-        portrait = await asyncio.wait_for(load_portrait(char.id), timeout=PORTRAIT_TIMEOUT)
-    except Exception:
-        # 超时/断网都当「没有立绘」处理，卡片本身照画
-        portrait = None
+    portrait, icons = await load_assets(char)
 
     try:
-        png = await asyncio.to_thread(render_card, char, portrait)
+        png = await asyncio.to_thread(render_card, char, portrait, icons)
         await char_cmd.finish(MessageSegment.file_image(png, f"arknights_{char.id}.png"))
     except Exception:
         logger.exception("干员卡渲染失败，改发文本")

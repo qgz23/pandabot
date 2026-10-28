@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -123,6 +124,10 @@ def fit_text(
 _NO_LINE_START = "，。、；：？！）〕］｝〉》」』】…·%,.;:?!)]}"
 _NO_LINE_END = "（〔［｛〈《「『【([{"
 
+# 连续的数字/英文/百分号算一个"词"，不能从中间断开。
+# 方舟技能里「攻击力提升至160%」被切成「至16」+「0%」，玩家会以为是两个数。
+_TOKEN_CH = re.compile(r"[0-9A-Za-z%]")
+
 
 def wrap_text(
     draw: ImageDraw.ImageDraw,
@@ -133,8 +138,10 @@ def wrap_text(
 ) -> list[str]:
     """按像素宽度折行。中文没有空格，只能逐字累加量宽。
 
-    带简单避头尾：断行时若撞上收尾标点，把它前一个字一起挤到下一行
-    （宁可下一行短两个字，也不要行首出现孤零零的「。」）。
+    两条禁则：
+    1. 收尾标点不落行首、起始括号不留行尾（宁可下一行短两个字，
+       也不要行首出现孤零零的「。」）
+    2. 数字和英文不拆开（「160%」不能变成「16」+「0%」）
     """
     lines: list[str] = []
     current = ""
@@ -147,6 +154,18 @@ def wrap_text(
             # 单字就超宽（极端情况），硬塞进去，否则死循环
             current = ch
             continue
+
+        # 数字/英文撞到行尾：把整段词退到下一行
+        if _TOKEN_CH.match(ch) and _TOKEN_CH.match(current[-1]):
+            cut = len(current)
+            while cut > 0 and _TOKEN_CH.match(current[cut - 1]):
+                cut -= 1
+            if cut > 0:  # cut == 0 说明整行都是一个词，只能硬断
+                lines.append(current[:cut])
+                current = current[cut:] + ch
+                if len(lines) >= max_lines:
+                    break
+                continue
 
         # 避头：行首不能是收尾标点 → 把当前行最后一个字拉下来陪它
         # 避尾：行末不能是起始括号 → 同上，把括号拉到下一行

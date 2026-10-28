@@ -9,13 +9,14 @@
     │ ┌────────┐  阿米娅                    │
     │ │        │  Amiya                     │
     │ │  立绘   │  ★★★★★                 │
-    │ │        │  术师 · 远程位              │
-    │ │        │  罗德岛   #输出             │
+    │ │        │  中坚术师 · 远程位           │
+    │ │        │  罗德岛  #输出  一句话简介    │
     │ └────────┘                            │
     │ 特性   攻击造成法术伤害                  │
-    │ 天赋   情绪吸收 …                       │
-    │ 技能   战术咏唱·γ型 · 精神爆发           │
-    │ 生命 1480  攻击 612  防御 121  法抗 20   │
+    │ 天赋   情绪吸收 额外回复技力 …           │
+    │ 技能   ▣ 战术咏唱·γ型  攻击速度+90       │
+    │        ▣ 精神爆发  8 连发，晕眩 10 秒    │
+    │ 属性   生命 1480 攻击 612 防御 121 …     │
     └───────────────────────────────────────┘
 
 几个必须踩对的点：
@@ -37,7 +38,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from src.utils.render import (
     draw_text,
@@ -67,6 +68,31 @@ CARD_BOTTOM = (24, 29, 40)
 # 右栏可用宽度
 RIGHT_X = PAD + LIVE_BOX + COL_GAP
 RIGHT_W = WIDTH - RIGHT_X - PAD
+
+# 技能块的图尺寸
+ICON_SIZE = 52
+SKILL_ICON_X = PAD + 96
+SKILL_TEXT_X = SKILL_ICON_X + ICON_SIZE + 16
+SKILL_TEXT_W = WIDTH - PAD - SKILL_TEXT_X
+
+
+def _fit_icon(raw: bytes | None) -> Image.Image | None:
+    """技能图标：128×128 原图缩到 52，四个角切圆。
+
+    图标本身是透明底 + 白色描边图形，直接贴到深色底上是干净的，
+    不需要额外加背景板。
+    """
+    if not raw:
+        return None
+    try:
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+    except Exception:
+        return None
+    im = im.resize((ICON_SIZE, ICON_SIZE), Image.Resampling.LANCZOS)
+    # 圆角和图标原本的透明通道要相乘，不能直接 putalpha —
+    # 直接盖会把图形外的透明区域涂成不透明，变成一块黑方底
+    im.putalpha(ImageChops.multiply(im.getchannel("A"), rounded_mask(im.size, 10)))
+    return im
 
 
 def _fit_portrait(raw: bytes | None) -> Image.Image | None:
@@ -110,9 +136,16 @@ def _chips(draw, texts: list[str], font, gap: int = 10, pad_x: int = 14,
     return placed, row + 1 if placed else 0
 
 
-def render_card(char: Char, portrait: bytes | None, sub_names: dict[str, str] | None = None) -> bytes:
-    """画一张干员卡，返回 PNG 字节。"""
+def render_card(char: Char, portrait: bytes | None,
+                icons: dict[str, bytes] | None = None,
+                sub_names: dict[str, str] | None = None) -> bytes:
+    """画一张干员卡，返回 PNG 字节。
+
+    icons: {技能 id: 图标字节}。缺哪个就那个技能画占位方块，
+           不影响整张卡 —— 图标是锦上添花，不能因为它拿不到就报错。
+    """
     accent = RARITY_COLORS.get(char.rarity, TEXT_DIM)
+    icons = icons or {}
 
     # 用一个 1×1 的画布当"尺子"，先量文字宽度。绘制阶段还要用，留着。
     ruler = ImageDraw.Draw(Image.new("RGB", (1, 1)))
@@ -158,12 +191,14 @@ def render_card(char: Char, portrait: bytes | None, sub_names: dict[str, str] | 
     if talent_rows:
         blocks.append(("天赋", talent_rows))
 
-    if char.skills:
-        # 分隔符不能用「·」：技能名本身就带（强力击·γ型），
-        # 混在一起会看成「强力击·γ型·雪境生存法则」一个技能
-        skills_text = " / ".join(char.skills[:4])
-        lines = wrap_text(ruler, skills_text, f_body, body_w, max_lines=2)
-        blocks.append(("技能", [("", line) for line in lines]))
+    # 技能块单独排版：一个技能 = 左边图标 + 右边名字和效果，不是一个字符串列表
+    f_sk_name = get_font(21, bold=True)
+    f_sk_desc = get_font(19)
+    skill_rows: list[tuple[dict, list[str], int]] = []
+    for skill in char.skills[:3]:
+        desc_lines = wrap_text(ruler, skill.get("d", ""), f_sk_desc, SKILL_TEXT_W, max_lines=3)
+        row_h = max(ICON_SIZE, 28 + len(desc_lines) * 27)
+        skill_rows.append((skill, desc_lines, row_h))
 
     # 属性：两行四列
     st = char.stats
@@ -190,6 +225,8 @@ def render_card(char: Char, portrait: bytes | None, sub_names: dict[str, str] | 
     body_h = 0
     for _, rows in blocks:
         body_h += 32 + len(rows) * line_h + block_gap
+    if skill_rows:
+        body_h += 32 + sum(row_h + 10 for _s, _l, row_h in skill_rows) + block_gap
     body_h += 32 + 40 + block_gap  # 属性块
 
     total_h = PAD + head_h + 34 + body_h + PAD + 26
@@ -276,6 +313,35 @@ def render_card(char: Char, portrait: bytes | None, sub_names: dict[str, str] | 
             ty += line_h
         y += 32 + len(rows) * line_h + block_gap
 
+    # 技能：一个技能一行 —— 左图标 + 右名字和效果
+    if skill_rows:
+        draw.text((PAD, y + 2), "技能", font=f_head, fill=accent)
+        sy = y
+        for skill, desc_lines, row_h in skill_rows:
+            icon = _fit_icon(icons.get(skill.get("i", "")))
+            # 描述长的时候行高会超过图标，图标垂直居中看着才不飘
+            iy = sy + (row_h - ICON_SIZE) // 2
+            if icon:
+                canvas.paste(icon, (SKILL_ICON_X, iy), icon)
+            else:
+                # 图标拿不到就画个方块占位，里面放技能名首字 ——
+                # 比空白或问号有信息量，也不至于让版式塌掉
+                draw.rounded_rectangle(
+                    (SKILL_ICON_X, iy, SKILL_ICON_X + ICON_SIZE, iy + ICON_SIZE),
+                    radius=10, fill=(38, 45, 60),
+                )
+                draw.text((SKILL_ICON_X + ICON_SIZE // 2, iy + ICON_SIZE // 2),
+                          (skill.get("n") or "技")[0],
+                          font=f_sk_name, fill=TEXT_FAINT, anchor="mm")
+            draw.text((SKILL_TEXT_X, sy - 2), skill.get("n", ""),
+                      font=f_sk_name, fill=TEXT_MAIN)
+            ty = sy + 28
+            for line in desc_lines:
+                draw.text((SKILL_TEXT_X, ty), line, font=f_sk_desc, fill=TEXT_DIM)
+                ty += 27
+            sy += row_h + 10
+        y += 32 + sum(row_h + 10 for _s, _l, row_h in skill_rows) + block_gap
+
     # 属性
     draw.text((PAD, y + 2), "属性", font=f_head, fill=accent)
     draw.text((PAD + 96, y), stat_text, font=f_val, fill=TEXT_MAIN)
@@ -289,8 +355,9 @@ def render_card(char: Char, portrait: bytes | None, sub_names: dict[str, str] | 
     draw.text((PAD + 96, y + 4), fit_text(draw, note, f_chip, WIDTH - PAD * 2 - 96),
               font=f_chip, fill=TEXT_FAINT)
 
-    # 底部水印
-    draw.text((WIDTH - PAD, total_h - 26), "数据 ArknightsGameData · 立绘 Aceship",
+    # 底部水印（顺手交代属性口径，不然「生命 2560」是哪一级的没人知道）
+    draw.text((WIDTH - PAD, total_h - 26),
+              "数据 ArknightsGameData · 立绘 Aceship · 技能为专精三数值",
               font=get_font(17), fill=(72, 80, 96), anchor="rs")
 
     return to_png_bytes(canvas)

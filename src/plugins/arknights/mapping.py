@@ -11,17 +11,22 @@ character_table.json 里除了「名字」和「标签」，其余全是英文�
 只能自己维护一份。这里只放**八大职业 / 阵营 / 位置**这种稳定不动的，
 数量少、永不过时。
 
-子职业（subProfessionId）故意不在这里硬编码：
-72 个子职业的中文名（"攻城手"/"散射手"…）靠记忆写必错一批，
-错了还看不出来。所以卡片上显示「职业 + 特性」——
-特性描述本身就是子职业的定义（"同时攻击阻挡的所有敌人"），
-玩家一看就懂，而且这句话是数据里直接拿的，不会错。
+子职业（subProfessionId）的中文名不在 gamedata 里，存在同目录的
+`subprof_names.json`，由 scripts/fetch_subprof_names.py 从 PRTS 干员页的
+`|分支=` 字段抓出来 —— 不是手抄的。
 
-真想显示子职业名，往 data/arknights/subprof_names.json 里填，
-格式 {"siegesniper": "攻城手"}，填了就用，没填就退回大职业名。
+为什么坚持不用手写：这批名字很容易记混。实测 `fighter` 是「斗士」、
+`centurion` 才是「强攻手」，`crusher` 是「重剑手」而 `hammer` 是「撼地者」。
+凭印象写会错一大片，而且错在图上根本看不出来（谁都以为自己记的对）。
 """
 
 from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+
+_SUBPROF_PATH = Path(__file__).parent / "subprof_names.json"
 
 # 八大职业。键是 character_table 里的 profession 值。
 PROFESSION_CN: dict[str, str] = {
@@ -106,10 +111,21 @@ def rarity_of(raw: str) -> int:
         return 1
 
 
+@lru_cache(maxsize=1)
+def subprof_names() -> dict[str, str]:
+    """子职业 id → 中文名。文件读不到就返回空表，界面自动退回大职业名。"""
+    try:
+        data = json.loads(_SUBPROF_PATH.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def profession_cn(prof: str, sub: str = "", sub_names: dict[str, str] | None = None) -> str:
-    """职业显示名。填了子职业映射就用子职业，否则退回大职业。"""
-    if sub_names and sub:
-        name = sub_names.get(sub)
+    """职业显示名。有子职业名就用子职业名，没有就退回大职业。"""
+    names = sub_names if sub_names is not None else subprof_names()
+    if sub:
+        name = names.get(sub)
         if name:
             return name
     return PROFESSION_CN.get(prof, "未知")

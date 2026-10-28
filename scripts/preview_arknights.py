@@ -51,13 +51,14 @@ async def main(queries: list[str]) -> None:
             print(f"  跳过 {query}：没搜到")
             continue
         char = hits[0]
-        portrait = await service.load_portrait(char.id)
-        png = render.render_card(char, portrait)
+        portrait, icons = await service.load_assets(char)
+        png = render.render_card(char, portrait, icons)
         path = OUT_DIR / f"方舟_{char.name}.png"
         path.write_bytes(png)
         print(
             f"  {char.name:<14} {char.rarity}星 {len(png) // 1024:>3}KB "
-            f"立绘={'有' if portrait else '无'} → {path.name}"
+            f"立绘={'有' if portrait else '无'} 图标={len(icons)}/{len(char.skills[:3])} "
+            f"→ {path.name}"
         )
 
     # 候选列表版式
